@@ -24,6 +24,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/pkg/langfuse"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/pkg/wsmanager"
 	"github.com/QuantumNous/new-api/relay"
@@ -74,6 +75,9 @@ func main() {
 	kitutil.Debug.Store(common.DebugEnabled)
 
 	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = langfuse.CloseDefault(shutdownCtx)
 		err := model.CloseDB()
 		if err != nil {
 			common.FatalLog(common.LogText("failed to close database: %s", err.Error()))
@@ -307,6 +311,7 @@ func InitResources() error {
 	ratio_setting.InitRatioSettings()
 
 	service.InitHttpClient()
+	langfuse.SetDefaultReporter(langfuse.NewReporter(langfuse.LoadConfig()))
 
 	// Initialize SQL Database
 	err = model.InitDB()

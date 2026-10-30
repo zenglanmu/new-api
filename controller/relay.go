@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/pkg/langfuse"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
@@ -78,6 +79,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	var (
 		newAPIError *types.NewAPIError
 		ws          *websocket.Conn
+		relayInfo   *relaycommon.RelayInfo
 	)
 
 	if relayFormat == types.RelayFormatOpenAIRealtime {
@@ -93,7 +95,38 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		if newAPIError != nil {
 			service.RecordRequestPolicyTermination(c, newAPIError)
-			logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
+			safeError := newAPIError.MaskSensitiveErrorWithStatusCode()
+			logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(safeError)))
+			durationMS := 0
+			if startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime); !startTime.IsZero() {
+				durationMS = int(time.Since(startTime).Milliseconds())
+			}
+			traceID := c.GetString("trace_id")
+			if traceID == "" {
+				traceID = c.GetHeader("X-Trace-ID")
+			}
+			sessionID := c.GetString("session_id")
+			if sessionID == "" {
+				sessionID = c.GetHeader("X-Session-ID")
+			}
+			modelName := ""
+			if relayInfo != nil {
+				modelName = relayInfo.OriginModelName
+			}
+			langfuse.Publish(langfuse.Event{
+				RequestID:  requestId,
+				TraceID:    traceID,
+				SessionID:  sessionID,
+				Model:      modelName,
+				DurationMS: durationMS,
+				Status:     "error",
+				Error:      common.LocalLogPreview(safeError),
+				Metadata: map[string]any{
+					"retry_count": c.GetInt("retry_count"),
+					"use_channel": c.GetStringSlice("use_channel"),
+					"http_status": newAPIError.StatusCode,
+				},
+			})
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			upstreamURLs := common.UpstreamAddresses(c)
 			if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() &&
@@ -131,7 +164,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
-	relayInfo, err := relaycommon.GenRelayInfo(c, relayFormat, request, ws)
+	relayInfo, err = relaycommon.GenRelayInfo(c, relayFormat, request, ws)
 	if err != nil {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return
@@ -179,6 +212,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
 		relayInfo.RetryIndex = retryParam.GetRetry()
+		c.Set("retry_count", relayInfo.RetryIndex)
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())

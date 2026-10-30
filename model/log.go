@@ -2,11 +2,13 @@ package model
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/pkg/langfuse"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -337,13 +339,47 @@ type RecordConsumeLogParams struct {
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
+	username := c.GetString("username")
+	requestId := c.GetString(common.RequestIdKey)
+	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
+	traceID := c.GetString("trace_id")
+	if traceID == "" {
+		traceID = c.GetHeader("X-Trace-ID")
+	}
+	sessionID := c.GetString("session_id")
+	if sessionID == "" {
+		sessionID = c.GetHeader("X-Session-ID")
+	}
+	// Observability is independent of consume-log retention: publish before the
+	// LogConsumeEnabled guard so traces survive a disabled log database.
+	langfuse.Publish(langfuse.Event{
+		RequestID:    requestId,
+		TraceID:      traceID,
+		SessionID:    sessionID,
+		UserID:       strconv.Itoa(userId),
+		Model:        params.ModelName,
+		InputTokens:  params.PromptTokens,
+		OutputTokens: params.CompletionTokens,
+		TotalTokens:  params.PromptTokens + params.CompletionTokens,
+		Quota:        params.Quota,
+		DurationMS:   params.UseTimeSeconds * 1000,
+		IsStream:     params.IsStream,
+		Status:       "success",
+		Metadata: map[string]any{
+			"username":            username,
+			"token_name":          params.TokenName,
+			"token_id":            params.TokenId,
+			"channel_id":          params.ChannelId,
+			"group":               params.Group,
+			"upstream_request_id": upstreamRequestId,
+			"retry_count":         c.GetInt("retry_count"),
+			"use_channel":         c.GetStringSlice("use_channel"),
+		},
+	})
 	if !common.LogConsumeEnabled {
 		return
 	}
 	logger.LogInfo(c, common.LogText("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
-	username := c.GetString("username")
-	requestId := c.GetString(common.RequestIdKey)
-	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
 	other := params.Other
 	content := other.setContent(params.Content)
