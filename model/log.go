@@ -352,6 +352,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	}
 	// Observability is independent of consume-log retention: publish before the
 	// LogConsumeEnabled guard so traces survive a disabled log database.
+	input, output := langfuse.CapturedContent(c)
 	langfuse.Publish(langfuse.Event{
 		RequestID:    requestId,
 		TraceID:      traceID,
@@ -365,6 +366,8 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		DurationMS:   params.UseTimeSeconds * 1000,
 		IsStream:     params.IsStream,
 		Status:       "success",
+		Input:        input,
+		Output:       output,
 		Metadata: map[string]any{
 			"username":            username,
 			"token_name":          params.TokenName,

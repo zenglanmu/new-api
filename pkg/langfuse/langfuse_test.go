@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -284,6 +285,38 @@ func TestCaptureContent(t *testing.T) {
 		assert.Equal(t, "\"0123456", marker.Preview)
 	})
 
+	t.Run("reports raw JSON content as JSON", func(t *testing.T) {
+		server, requests := newOTLPCollector(t, http.StatusOK, "")
+		reporter := NewReporter(Config{
+			Enabled:         true,
+			Host:            server.URL,
+			PublicKey:       "public",
+			SecretKey:       "secret",
+			SampleRate:      1,
+			QueueSize:       2,
+			BatchSize:       5,
+			FlushInterval:   time.Hour,
+			CaptureContent:  true,
+			ContentMaxBytes: 4096,
+			HTTPClient:      server.Client(),
+		})
+		closeReporter(t, reporter)
+		reporter.Publish(Event{
+			RequestID: "json",
+			Input:     common.RawMessage(`{"messages":[{"role":"user","content":"hello"}]}`),
+			Output:    common.RawMessage(`{"choices":[{"message":{"content":"world"}}]}`),
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, reporter.Flush(ctx))
+		got := requireResponse(t, requests)
+		require.NoError(t, got.decodeErr)
+
+		attributes := attributeMap(got.payload.ResourceSpans[0].ScopeSpans[0].Spans[0].Attributes)
+		assert.JSONEq(t, `{"messages":[{"role":"user","content":"hello"}]}`, attributeString(t, attributes, "langfuse.observation.input"))
+		assert.JSONEq(t, `{"choices":[{"message":{"content":"world"}}]}`, attributeString(t, attributes, "langfuse.observation.output"))
+	})
+
 	t.Run("omits content when capture is off", func(t *testing.T) {
 		server, requests := newOTLPCollector(t, http.StatusOK, "")
 		reporter := NewReporter(Config{
@@ -314,6 +347,181 @@ func TestCaptureContent(t *testing.T) {
 		assert.False(t, hasInput)
 		assert.False(t, hasOutput)
 	})
+}
+
+func TestCaptureGatewayContent(t *testing.T) {
+	const requestBody = `{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`
+	const responseBody = `{"choices":[{"message":{"content":"world"}}]}`
+
+	t.Run("captures request and response bodies", func(t *testing.T) {
+		setCaptureReporter(t, 4096)
+		c := newCaptureContext(t, requestBody)
+		AttachContentCapture(c)
+		c.Writer.Header().Set("Content-Type", "application/json")
+		_, err := c.Writer.WriteString(responseBody)
+		require.NoError(t, err)
+
+		input, output := CapturedContent(c)
+
+		require.IsType(t, common.RawMessage(nil), input)
+		assert.JSONEq(t, requestBody, string(input.(common.RawMessage)))
+		require.IsType(t, common.RawMessage(nil), output)
+		assert.JSONEq(t, responseBody, string(output.(common.RawMessage)))
+	})
+
+	t.Run("folds SSE chunks into the final output", func(t *testing.T) {
+		setCaptureReporter(t, 4096)
+		c := newCaptureContext(t, requestBody)
+		AttachContentCapture(c)
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		_, err := c.Writer.WriteString("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n" +
+			": PING\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\n" +
+			"data: [DONE]\n\n")
+		require.NoError(t, err)
+
+		_, output := CapturedContent(c)
+
+		raw, ok := output.(common.RawMessage)
+		require.True(t, ok, "expected raw JSON, got %T", output)
+		assert.JSONEq(t, `"hello"`, string(raw))
+	})
+
+	t.Run("truncates oversized request and response bodies", func(t *testing.T) {
+		setCaptureReporter(t, 16)
+		c := newCaptureContext(t, requestBody)
+		AttachContentCapture(c)
+		_, err := c.Writer.WriteString(responseBody)
+		require.NoError(t, err)
+
+		input, output := CapturedContent(c)
+
+		var inputMarker truncatedContent
+		require.NoError(t, common.Unmarshal(input.(common.RawMessage), &inputMarker))
+		assert.True(t, inputMarker.Truncated)
+		assert.Equal(t, len(requestBody), inputMarker.OriginalBytes)
+
+		var outputMarker truncatedContent
+		require.NoError(t, common.Unmarshal(output.(common.RawMessage), &outputMarker))
+		assert.True(t, outputMarker.Truncated)
+		assert.Equal(t, len(responseBody), outputMarker.OriginalBytes)
+	})
+
+	t.Run("does not capture when disabled", func(t *testing.T) {
+		SetDefaultReporter(nil)
+		c := newCaptureContext(t, requestBody)
+		originalWriter := c.Writer
+		AttachContentCapture(c)
+		assert.True(t, originalWriter == c.Writer)
+
+		_, err := c.Writer.WriteString(responseBody)
+		require.NoError(t, err)
+		input, output := CapturedContent(c)
+		assert.Nil(t, input)
+		assert.Nil(t, output)
+	})
+}
+
+func TestStreamContentValue(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		total int
+		limit int
+		want  string
+	}{
+		{
+			name: "openai chat text and tool call",
+			body: `data: {"choices":[{"delta":{"content":"Hello"}}]}
+data: {"choices":[{"delta":{"content":" world","tool_calls":[{"index":0,"function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]}}]}
+data: [DONE]`,
+			want: `{"text":"Hello world","tool_calls":[{"name":"lookup","arguments":"{\"q\":\"x\"}"}]}`,
+		},
+		{
+			name: "claude text reasoning and tool input",
+			body: `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"think"}}
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"search","input":{}}}
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"x\"}"}}`,
+			want: `{"text":"Hi","reasoning":"think","tool_calls":[{"name":"search","arguments":"{\"q\":\"x\"}"}]}`,
+		},
+		{
+			name: "responses text and function arguments",
+			body: `data: {"type":"response.output_text.delta","delta":"Hel"}
+data: {"type":"response.output_text.delta","delta":"lo"}
+data: {"type":"response.function_call_arguments.delta","output_index":0,"name":"lookup","delta":"{\"q\":"}
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"\"x\"}"}`,
+			want: `{"text":"Hello","tool_calls":[{"name":"lookup","arguments":"{\"q\":\"x\"}"}]}`,
+		},
+		{
+			name: "gemini parts",
+			body: `data: {"candidates":[{"content":{"parts":[{"text":"你好"}]}}]}
+data: {"candidates":[{"content":{"parts":[{"text":"，世界"}]}}]}`,
+			want: `"你好，世界"`,
+		},
+		{
+			name: "cumulative provider chunks do not duplicate",
+			body: `data: {"choices":[{"delta":{"content":"Hel"}}]}
+data: {"choices":[{"delta":{"content":"Hello"}}]}`,
+			want: `"Hello"`,
+		},
+		{
+			name: "non textual stream has no output",
+			body: `data: {"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png"}}]}}]}`,
+			want: "",
+		},
+		{
+			name:  "truncated raw stream is marked",
+			body:  `data: {"choices":[{"delta":{"content":"Hello"}}]}`,
+			total: 4097,
+			limit: 4096,
+			want:  `{"text":"Hello","truncated":true}`,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			total := testCase.total
+			if total == 0 {
+				total = len(testCase.body)
+			}
+			limit := testCase.limit
+			if limit == 0 {
+				limit = 4096
+			}
+			got := streamContentValue([]byte(testCase.body), int64(total), limit)
+			if testCase.want == "" {
+				assert.Nil(t, got)
+				return
+			}
+			raw, ok := got.(common.RawMessage)
+			require.True(t, ok, "expected raw JSON, got %T", got)
+			assert.JSONEq(t, testCase.want, string(raw))
+		})
+	}
+}
+
+func setCaptureReporter(t *testing.T, maxBytes int) {
+	t.Helper()
+	previous := DefaultReporter()
+	SetDefaultReporter(&Reporter{
+		config:  Config{CaptureContent: true, ContentMaxBytes: maxBytes},
+		started: true,
+	})
+	t.Cleanup(func() { SetDefaultReporter(previous) })
+}
+
+func newCaptureContext(t *testing.T, body string) *gin.Context {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	storage, err := common.CreateBodyStorage([]byte(body))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storage.Close() })
+	c.Set(common.KeyBodyStorage, storage)
+	return c
 }
 
 func TestSendHostSecurity(t *testing.T) {

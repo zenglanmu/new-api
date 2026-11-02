@@ -135,6 +135,10 @@ need to rotate on a running stack.
 
 `LANGFUSE_SAMPLE_RATE` limits the share of requests that are traced and
 `LANGFUSE_CAPTURE_CONTENT` controls whether prompt/response bodies are stored.
+When enabled, the generation observation's input is the client request body and
+its output is the relayed response body. SSE responses are folded into the final
+text, reasoning, and tool calls instead of storing every chunk. Both values are
+bounded by `LANGFUSE_CONTENT_MAX_BYTES`.
 
 ## Data retention
 

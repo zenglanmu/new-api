@@ -72,6 +72,9 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
+	// Capture the response body for Langfuse before any handler writes it.
+	langfuse.AttachContentCapture(c)
+
 	requestId := c.GetString(common.RequestIdKey)
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 	//originalModel := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
@@ -113,6 +116,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			if relayInfo != nil {
 				modelName = relayInfo.OriginModelName
 			}
+			input, output := langfuse.CapturedContent(c)
 			langfuse.Publish(langfuse.Event{
 				RequestID:  requestId,
 				TraceID:    traceID,
@@ -121,6 +125,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				DurationMS: durationMS,
 				Status:     "error",
 				Error:      common.LocalLogPreview(safeError),
+				Input:      input,
+				Output:     output,
 				Metadata: map[string]any{
 					"retry_count": c.GetInt("retry_count"),
 					"use_channel": c.GetStringSlice("use_channel"),
