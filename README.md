@@ -14,6 +14,13 @@
   <a href="./README.ja.md">日本語</a>
 </p>
 
+> **Fork note:** This is the [`zenglanmu/new-api`](https://github.com/zenglanmu/new-api)
+> fork of [`QuantumNous/new-api`](https://github.com/QuantumNous/new-api). In
+> addition to upstream features, it can export detailed request logs to a
+> self-hosted [Langfuse](https://langfuse.com/) v4 instance over OTLP: sampled
+> traces, optional prompt/response capture, and a 7-day default retention
+> window. See [`deploy/langfuse/README.md`](./deploy/langfuse/README.md).
+
 <p align="center">
   <a href="https://raw.githubusercontent.com/Calcium-Ion/new-api/main/LICENSE">
     <img src="https://img.shields.io/github/license/Calcium-Ion/new-api?color=brightgreen" alt="license">

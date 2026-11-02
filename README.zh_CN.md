@@ -14,6 +14,12 @@
   <a href="./README.ja.md">日本語</a>
 </p>
 
+> **Fork 说明：** 本仓库是 [`QuantumNous/new-api`](https://github.com/QuantumNous/new-api)
+> 的 [`zenglanmu/new-api`](https://github.com/zenglanmu/new-api) fork。在上游功能之外，
+> 支持将详细的请求日志通过 OTLP 上报到自建的 [Langfuse](https://langfuse.com/) v4：
+> 可配置采样比例、可选记录请求/响应正文，默认保留 7 天。部署说明见
+> [`deploy/langfuse/README.md`](./deploy/langfuse/README.md)。
+
 <p align="center">
   <a href="https://raw.githubusercontent.com/Calcium-Ion/new-api/main/LICENSE">
     <img src="https://img.shields.io/github/license/Calcium-Ion/new-api?color=brightgreen" alt="license">
