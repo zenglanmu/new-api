@@ -204,6 +204,65 @@ services:
         "$$RC" mb --ignore-existing "rustfs/$${LANGFUSE_BUCKET}"
     logging: *default-logging
 
+  clickhouse-retention:
+    # Applies the retention window as a ClickHouse TTL, which is how Langfuse
+    # documents self-hosted cleanup. It waits for langfuse-web so the schema
+    # migrations have created the tables, then re-applies the TTL on every boot
+    # (MODIFY TTL is metadata-only and idempotent).
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:25.12}
+    restart: "no"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_USER: "${CLICKHOUSE_USER:-clickhouse}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-CHANGEME-clickhouse}"
+      LANGFUSE_RETENTION_DAYS: "${LANGFUSE_RETENTION_DAYS:-7}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        days="$${LANGFUSE_RETENTION_DAYS}"
+        case "$$days" in
+          ''|*[!0-9]*)
+            echo "LANGFUSE_RETENTION_DAYS must be an integer, got: $$days" >&2
+            exit 1
+            ;;
+        esac
+        if [ "$$days" -lt 3 ]; then
+          echo "LANGFUSE_RETENTION_DAYS must be at least 3, got: $$days" >&2
+          exit 1
+        fi
+        ch() {
+          clickhouse client --host clickhouse --database default \
+            --user "$${CLICKHOUSE_USER}" --password "$${CLICKHOUSE_PASSWORD}" --query "$$1"
+        }
+        applied=0
+        apply_ttl() {
+          table="$$1"
+          column="$$2"
+          if [ "$$(ch "EXISTS TABLE default.$${table}")" != "1" ]; then
+            echo "skip missing table default.$${table}"
+            return 0
+          fi
+          ch "ALTER TABLE default.$${table} MODIFY TTL toDateTime($${column}) + INTERVAL $${days} DAY DELETE"
+          echo "applied $${days}-day TTL to default.$${table}"
+          applied=$$((applied + 1))
+        }
+        apply_ttl traces timestamp
+        apply_ttl observations start_time
+        apply_ttl scores timestamp
+        apply_ttl events_full start_time
+        apply_ttl events_core start_time
+        if [ "$$applied" -eq 0 ]; then
+          echo "no Langfuse tables found in ClickHouse database default; check langfuse-web migrations" >&2
+          exit 1
+        fi
+    logging: *default-logging
+
   langfuse-web:
     image: ${LANGFUSE_IMAGE:-langfuse/langfuse:4}
     restart: always
@@ -234,6 +293,10 @@ services:
       LANGFUSE_INIT_PROJECT_NAME: "${LANGFUSE_INIT_PROJECT_NAME:-new-api}"
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-00000000-0000-0000-0000-000000000000}"
       LANGFUSE_INIT_PROJECT_SECRET_KEY: "${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-00000000-0000-0000-0000-000000000000}"
+      # Langfuse's own project retention needs an Enterprise data-retention
+      # entitlement; the OSS image ignores it. clickhouse-retention enforces the
+      # same window with a ClickHouse TTL.
+      LANGFUSE_INIT_PROJECT_RETENTION: "${LANGFUSE_INIT_PROJECT_RETENTION:-7}"
       LANGFUSE_INIT_USER_EMAIL: "${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}"
       LANGFUSE_INIT_USER_NAME: "${LANGFUSE_INIT_USER_NAME:-admin}"
       LANGFUSE_INIT_USER_PASSWORD: "${LANGFUSE_INIT_USER_PASSWORD:-CHANGEME-langfuse-password}"

@@ -42,7 +42,7 @@ an offline bundle.
 - Docker Engine 24+ with the compose v2 plugin (`docker compose version`).
 - 4 CPU, 16 GiB RAM. ClickHouse will use most of the memory under ingest load.
 - ~100 GiB free disk for ClickHouse plus image storage. Traces are the largest
-  consumer; plan retention before going to production.
+  consumer; the stack keeps seven days by default (see Data retention below).
 - Ports `3000`, `3001`, and `9090` reachable by users. `9090` is RustFS's S3 API:
   Langfuse hands browsers presigned URLs for media. All other ports bind to
   `127.0.0.1` only, including the RustFS console on `9091`.
@@ -135,6 +135,24 @@ need to rotate on a running stack.
 
 `LANGFUSE_SAMPLE_RATE` limits the share of requests that are traced and
 `LANGFUSE_CAPTURE_CONTENT` controls whether prompt/response bodies are stored.
+
+## Data retention
+
+`LANGFUSE_RETENTION_DAYS` (default `7`, minimum `3`) caps Langfuse data in
+ClickHouse. The one-shot `clickhouse-retention` service waits for `langfuse-web`
+to finish its schema migrations and then applies a ClickHouse TTL to `traces`,
+`observations`, `scores`, `events_full`, and `events_core`. It re-applies the
+TTL on every boot, so changing the value and running `docker compose up -d` is
+enough. ClickHouse removes expired rows in the background; deletion is not
+instant.
+
+Langfuse's own project-level retention (`LANGFUSE_INIT_PROJECT_RETENTION`) only
+takes effect with an Enterprise data-retention entitlement. Keep it in sync
+with `LANGFUSE_RETENTION_DAYS` if the stack runs an Enterprise license.
+
+ClickHouse TTL removes rows, not objects already written to RustFS. Event and
+media blobs survive row expiry, so add an S3 lifecycle rule on the bucket if
+you need a hard cap on object storage as well.
 
 ## Building and shipping the offline bundle
 
