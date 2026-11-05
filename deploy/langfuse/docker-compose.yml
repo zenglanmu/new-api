@@ -18,6 +18,16 @@ x-logging: &default-logging
     max-size: 10m
     max-file: "3"
 
+# Every long-running service sets pids_limit. Docker applies the value as
+# TasksMax on the container's systemd scope, which overrides the daemon-wide
+# DefaultTasksMax that systemd derives as 15% of kernel.threads-max (270 on a
+# host where threads-max is the unusually low 1802). Without an explicit limit
+# ClickHouse inherits that cap, exhausts it during normal query and merge work,
+# and every query then fails with "Cannot schedule a task: failed to start the
+# thread ... Resource temporarily unavailable" while the rest of the stack still
+# reports healthy. Keep the host-wide kernel.threads-max above the sum of these
+# limits; see the Prerequisites section of README.md.
+
 # Shared by langfuse-web and langfuse-worker. Keep both services on the same
 # values: the worker decrypts credentials written by the web service, and both
 # write to the same ClickHouse/S3/Redis instances.
@@ -79,6 +89,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 10s
+    pids_limit: 512
     logging: *default-logging
 
   redis:
@@ -104,6 +115,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 5s
+    pids_limit: 256
     logging: *default-logging
 
   langfuse-redis:
@@ -129,6 +141,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 5s
+    pids_limit: 256
     logging: *default-logging
 
   clickhouse:
@@ -153,6 +166,7 @@ services:
       timeout: 5s
       retries: 30
       start_period: 10s
+    pids_limit: 4096
     logging: *default-logging
 
   rustfs:
@@ -179,6 +193,7 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
+    pids_limit: 512
     logging: *default-logging
 
   create-bucket:
@@ -238,7 +253,8 @@ services:
         fi
         ch() {
           clickhouse client --host clickhouse --database default \
-            --user "$${CLICKHOUSE_USER}" --password "$${CLICKHOUSE_PASSWORD}" --query "$$1"
+            --user "$${CLICKHOUSE_USER}" --password "$${CLICKHOUSE_PASSWORD}" \
+            --enable_full_text_index=1 --query "$$1"
         }
         applied=0
         apply_ttl() {
@@ -312,6 +328,7 @@ services:
       timeout: 5s
       retries: 30
       start_period: 90s
+    pids_limit: 1024
     logging: *default-logging
 
   langfuse-worker:
@@ -339,6 +356,7 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
+    pids_limit: 1024
     logging: *default-logging
 
   new-api:
@@ -383,6 +401,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+    pids_limit: 512
     logging: *default-logging
 
 volumes:

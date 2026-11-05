@@ -51,6 +51,22 @@ an offline bundle.
   which is correct for the default `postgres:17-alpine`: if you override
   `POSTGRES_IMAGE` with an 18+ image, mount the volume at `/var/lib/postgresql`
   instead, otherwise the container refuses to start.
+- Container task limits. Every long-running service sets `pids_limit`, which
+  Docker applies as `TasksMax` on the container's systemd scope. That overrides
+  the daemon-wide `DefaultTasksMax`, which systemd derives as 15% of
+  `kernel.threads-max`. The host-wide pool still caps every limit, so check
+  `sysctl kernel.threads-max`: some KVM images ship an abnormally low value
+  (`1802` on the host this stack was diagnosed on), which leaves the inherited
+  default at 270 tasks per container and starves ClickHouse. If the value is
+  below the sum of the `pids_limit` values (8192 by default), raise it before
+  the first boot:
+
+  ```bash
+  echo 'kernel.threads-max = 262144' | sudo tee /etc/sysctl.d/99-threads-max.conf
+  sudo sysctl --system
+  ```
+
+  See Troubleshooting below for the failure this prevents.
 
 ## First boot
 
@@ -96,6 +112,7 @@ Verify:
 docker compose ps
 curl -fsS http://localhost:3001/api/public/health
 curl -fsS http://localhost:3000/api/status
+docker inspect -f '{{.HostConfig.PidsLimit}}' "$(docker compose ps -q clickhouse)"  # 4096, not empty
 ```
 
 ## Logging into Langfuse
@@ -230,6 +247,47 @@ same exact version and take a Postgres, ClickHouse, and RustFS backup before
 upgrading.
 ClickHouse cannot be downgraded, so keep the previous image tags available until
 the new release has been verified.
+
+## Troubleshooting: ClickHouse thread starvation
+
+Symptom: `langfuse-web` logs, while the containers still report healthy:
+
+```
+ClickHouse query failed with non-retryable error: Cannot schedule a task:
+failed to start the thread: std::exception. Code: 1001, type: std::__1::system_error,
+e.what() = thread constructor failed: Resource temporarily unavailable
+```
+
+Follow-up symptoms are `socket hang up` retries from the ClickHouse client,
+`clickhouse` going `unhealthy`, and `docker exec <clickhouse> sh` printing
+`sh: 0: Cannot fork`.
+
+ClickHouse creates a thread per query and per merge; a few hundred at rest is
+normal. When the container cgroup hits its task cap, thread creation fails and
+queries stop, while Postgres, Redis, and RustFS keep working. Find the cap:
+
+```bash
+for c in $(docker ps -q); do
+  id=$(docker inspect -f '{{.Id}}' "$c")
+  printf '%-45s %s/%s\n' "$(docker inspect -f '{{.Name}}' "$c")" \
+    "$(cat "/sys/fs/cgroup/system.slice/docker-$id.scope/pids.current")" \
+    "$(cat "/sys/fs/cgroup/system.slice/docker-$id.scope/pids.max")"
+done
+docker inspect -f '{{.HostConfig.PidsLimit}}' <clickhouse-container>
+systemctl show "docker-$(docker inspect -f '{{.Id}}' <clickhouse-container>).scope" -p TasksMax
+```
+
+`pids.current` pinned to `pids.max` with `PidsLimit` empty means the container
+inherited `DefaultTasksMax`. Fix it by raising `kernel.threads-max` as shown
+under Prerequisites, then recreate the containers so their systemd scopes pick
+up the new limit:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+Existing containers keep their old scope limit until they are recreated;
+`docker compose restart` is not enough.
 
 ## `LANGFUSE_INSECURE=true`
 
