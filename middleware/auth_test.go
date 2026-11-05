@@ -114,6 +114,65 @@ func TestTokenAuthReadOnlyTranslatesErrors(t *testing.T) {
 	}
 }
 
+// A key issued by another gateway may itself contain '-'. The full key must be
+// matched before the legacy "sk-<key>-<channelId>" split, and that split must
+// keep working for keys that are not stored verbatim.
+func TestTokenAuthReadOnlyMatchesFullKeyBeforeChannelSelector(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousDB := model.DB
+	previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
+	previousPath, previousMaster := common.SQLitePath, common.IsMasterNode
+	previousRedis := common.RedisEnabled
+	common.SQLitePath, common.IsMasterNode = t.TempDir()+"/token-key.db", true
+	common.RedisEnabled = false
+	t.Setenv("SQL_DSN", "")
+	require.NoError(t, model.InitDB())
+	database := model.DB
+	t.Cleanup(func() {
+		model.DB = previousDB
+		common.SetDatabaseTypes(previousMain, previousLog)
+		common.SQLitePath, common.IsMasterNode = previousPath, previousMaster
+		common.RedisEnabled = previousRedis
+		if sqlDB, err := database.DB(); err == nil {
+			require.NoError(t, sqlDB.Close())
+		}
+	})
+
+	user := &model.User{
+		Username: "hyphen-token-owner", Password: "password-placeholder",
+		Status: common.UserStatusEnabled, Role: common.RoleCommonUser,
+		Group: "default", AffCode: "hyphen-token-aff",
+	}
+	require.NoError(t, database.Create(user).Error)
+	for _, key := range []string{"UxvK_XpXBwL", "UxvK_XpXBwL-pKEjDEOJhQ"} {
+		require.NoError(t, database.Create(&model.Token{
+			UserId: user.Id, Key: key, Status: common.TokenStatusEnabled,
+			Name: key, ExpiredTime: -1, UnlimitedQuota: true,
+		}).Error)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		authorize    string
+		wantTokenKey string
+	}{
+		{"hyphenated key is stored verbatim", "Bearer sk-UxvK_XpXBwL-pKEjDEOJhQ", "UxvK_XpXBwL-pKEjDEOJhQ"},
+		{"legacy channel selector still resolves the prefix", "Bearer sk-UxvK_XpXBwL-123", "UxvK_XpXBwL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/usage/token", nil)
+			c.Request.Header.Set("Authorization", tc.authorize)
+			TokenAuthReadOnly()(c)
+			require.False(t, c.IsAborted(), recorder.Body.String())
+			tokenKey, ok := c.Get("token_key")
+			require.True(t, ok)
+			assert.Equal(t, tc.wantTokenKey, tokenKey)
+		})
+	}
+}
+
 func TestUserAuthAllowsOpaqueDottedPAT(t *testing.T) {
 	setupDashboardAuthMiddlewareTest(t)
 	user := createMiddlewarePATUser(t, "dotted-pat-user", "opaque.key.with-dots")

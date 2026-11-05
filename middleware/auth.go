@@ -468,10 +468,14 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 			key = strings.TrimSpace(key[7:])
 		}
 		key = strings.TrimPrefix(key, "sk-")
-		parts := strings.Split(key, "-")
-		key = parts[0]
-
 		token, err := model.GetTokenByKey(key, false)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// The key itself may contain '-'; fall back to the legacy
+			// "sk-<key>-<channelId>" prefix only when nothing matched.
+			if prefix, _, hasChannelSelector := strings.Cut(key, "-"); hasChannelSelector {
+				token, err = model.GetTokenByKey(prefix, false)
+			}
+		}
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				common.ApiErrorStatus(c, http.StatusUnauthorized, errors.New(common.TranslateMessage(c, i18n.MsgTokenInvalid)))
@@ -552,7 +556,6 @@ func TokenAuth() func(c *gin.Context) {
 			}
 		}
 		key := c.Request.Header.Get("Authorization")
-		parts := make([]string, 0)
 		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 			key = strings.TrimSpace(key[7:])
 		}
@@ -561,15 +564,20 @@ func TokenAuth() func(c *gin.Context) {
 			if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 				key = strings.TrimSpace(key[7:])
 			}
-			key = strings.TrimPrefix(key, "sk-")
-			parts = strings.Split(key, "-")
-			key = parts[0]
-		} else {
-			key = strings.TrimPrefix(key, "sk-")
-			parts = strings.Split(key, "-")
-			key = parts[0]
 		}
-		token, err := model.ValidateUserToken(key)
+		// A token key may itself contain '-', so the full key is looked up first.
+		// Only when it matches no token does the legacy "sk-<key>-<channelId>"
+		// form apply; those parts then select the pinned channel.
+		rawKey := strings.TrimPrefix(key, "sk-")
+		prefix, channelSelector, hasChannelSelector := strings.Cut(rawKey, "-")
+		var parts []string
+		token, err := model.ValidateUserToken(rawKey)
+		if token == nil && errors.Is(err, model.ErrTokenInvalid) && hasChannelSelector {
+			token, err = model.ValidateUserToken(prefix)
+			if err == nil {
+				parts = []string{prefix, channelSelector}
+			}
+		}
 		if token != nil {
 			id := c.GetInt("id")
 			if id == 0 {
